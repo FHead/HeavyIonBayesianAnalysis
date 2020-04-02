@@ -32,13 +32,13 @@ import emcee
 import h5py
 import numpy as np
 from scipy.linalg import lapack
-from sklearn.externals import joblib
+import joblib
 from . import workdir, systems, observables, exp_data_list, exp_cov#, expt
 from .design import Design
 from .emulator import emulators
 import pickle
 from scipy.stats import multivariate_normal
-
+from operator import add
 
 
 def cov(
@@ -157,6 +157,20 @@ def mvn_loglike(y, cov):
 
     return -.5*np.dot(y, alpha) - np.log(L.diagonal()).sum()
 
+def mvd_loglike(y, cov):
+    return -0.5 * np.dot(y, y)
+
+def mvc_loglike(y, cov):
+    dy = y / np.sqrt(cov.diagonal())
+    return -0.5 * np.dot(dy, dy)
+
+def loglike(y, cov, t):
+    if t == 1:
+        return mvd_loglike(y, cov)
+    elif t == 2:
+        return mvc_loglike(y, cov)
+    return mvn_loglike(y, cov)
+
 class LoggingEnsembleSampler(emcee.EnsembleSampler):
     def run_mcmc(self, X0, nsteps, status=None, **kwargs):
         """
@@ -164,7 +178,7 @@ class LoggingEnsembleSampler(emcee.EnsembleSampler):
         nsteps).
 
         """
-        logging.info('running %d walkers for %d steps', self.k, nsteps)
+        # logging.info('running %d walkers for %d steps', self.k, nsteps)
 
         if status is None:
             status = nsteps // 10
@@ -292,7 +306,7 @@ class Chain:
             for n, sys in enumerate(systems)
         }
 
-    def log_posterior(self, X, extra_std_prior_scale=0.05, model_sys_error = False):
+    def log_posterior(self, X, extra_std_prior_scale=0.25, model_sys_error = False):
         """
         Evaluate the posterior at `X`.
 
@@ -319,6 +333,10 @@ class Chain:
             else:
                 extra_std = 0.0
 
+            # print("X")
+            # print(X)
+            # print(extra_std)
+
             pred = self._predict(
                 X[inside], return_cov=True, extra_std=extra_std
             )
@@ -326,29 +344,52 @@ class Chain:
             for sys in systems:
                 nobs = self._expt_y[sys].size
                 # allocate difference (model - expt) and covariance arrays
-                dY = np.empty((nsamples, nobs))
-                cov = np.empty((nsamples, nobs, nobs))
+                dY = np.zeros((nsamples, nobs))
+                cov1 = np.zeros((nsamples, nobs, nobs))
+                cov0 = np.zeros((nsamples, nobs, nobs))
+                ltype = np.full(nsamples, self.likelihood_type)
 
                 model_Y, model_cov = pred[sys]
+
+                # print("Meow")
+                # print(cov[1,:,:])
 
                 # copy predictive mean and covariance into allocated arrays
                 for obs1, subobs1, slc1 in self._slices[sys]:
                     dY[:, slc1] = model_Y[obs1][subobs1]
                     for obs2, subobs2, slc2 in self._slices[sys]:
-                        cov[:, slc1, slc2] = model_cov[(obs1, subobs1), (obs2, subobs2)]
+                        cov1[:, slc1, slc2] += model_cov[(obs1, subobs1), (obs2, subobs2)] * self.model_cov_modifier
+
+                # print("Meow2")
+                # print(cov[1,:,:])
 
                 # subtract expt data from model data
-                dY -= self._expt_y[sys]
+                # print(sys)
+                # print("Y", dY[:])
+                # print("Exp", self._expt_y[sys])
+                dY[:] -= self._expt_y[sys]
+                # print("DY", dY[:])
 
                 # add expt cov to model cov
-                cov += self._expt_cov[sys]
+                cov1[:] += self._expt_cov[sys]
+                cov0[:] += self._expt_cov[sys]
 
                 # compute log likelihood at each point
-                lp[inside] += list(map(mvn_loglike, dY, cov))
+                if self.model_cov_factor == 1:
+                    lp[inside] += list(map(loglike, dY, cov1, ltype))
+                elif self.model_cov_factor == 0:
+                    lp[inside] += list(map(loglike, dY, cov0, ltype))
+                else:
+                    lp[inside] += list(map(add,
+                        list([x * self.model_cov_factor for x in list(map(loglike, dY, cov1, ltype))]),
+                        list([x * (1 - self.model_cov_factor) for x in list(map(loglike, dY, cov0, ltype))])))
+
+                # print(list(map(mvn_loglike, dY, cov1)))
+                # print(list(map(mvn_loglike, dY, cov0)))
 
             # add prior for extra_std (model sys error)
             if model_sys_error:
-                lp[inside] += 2*np.log(extra_std) - extra_std/extra_std_prior_scale
+                lp[inside] += 2*np.log(extra_std) - extra_std / extra_std_prior_scale
 
         return lp
 
@@ -368,7 +409,7 @@ class Chain:
         """
         return f(args)
 
-    def run_mcmc(self, nsteps, nburnsteps=None, nwalkers=None, status=None):
+    def run_mcmc(self, nsteps, nburnsteps=None, nwalkers=None, status=None, model_cov_modifier=None, model_cov_factor=None, likelihood_type=None):
         """
         Run MCMC model calibration.  If the chain already exists, continue from
         the last point, otherwise burn-in and start the chain.
@@ -395,6 +436,9 @@ class Chain:
                 burn = False
                 nwalkers = dset.shape[0]
 
+            self.model_cov_modifier = model_cov_modifier
+            self.model_cov_factor = model_cov_factor
+            self.likelihood_type = likelihood_type
             sampler = LoggingEnsembleSampler(
                 nwalkers, self.ndim, self.log_posterior, pool=self
             )
@@ -528,6 +572,18 @@ def main():
     parser.add_argument(
         '--status', type=int,
         help='number of steps between logging status'
+    )
+    parser.add_argument(
+        '--model_cov_modifier', type=float, default=0.25,
+        help='model cov modifier'
+    )
+    parser.add_argument(
+        '--model_cov_factor', type=float, default=1.00,
+        help='model cov factor'
+    )
+    parser.add_argument(
+        '--likelihood_type', type=int, default=0,
+        help='type of likelihood.  0 = mvn, 1 = d^2, 2 = chi^2'
     )
 
     Chain().run_mcmc(**vars(parser.parse_args()))

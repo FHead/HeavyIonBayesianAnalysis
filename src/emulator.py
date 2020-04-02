@@ -18,7 +18,7 @@ import pickle
 
 import numpy as np
 from sklearn.decomposition import PCA
-from sklearn.externals import joblib
+import joblib
 from sklearn.gaussian_process import GaussianProcessRegressor as GPR
 from sklearn.gaussian_process import kernels
 from sklearn.preprocessing import StandardScaler
@@ -65,7 +65,7 @@ class Emulator:
 
     """
 
-    def __init__(self, system, npc=10, nrestarts=0):
+    def __init__(self, system, npc=10, nrestarts=0, nu=2.5):
         logging.info(
             'training emulator for system %s (%d PC, %d restarts)',
             system, npc, nrestarts
@@ -109,13 +109,23 @@ class Emulator:
         ptp = design.max - design.min
         print(ptp)
         kernel = (
-            1. * kernels.Matern(
-                length_scale=ptp,
-                length_scale_bounds=np.outer(ptp, (.1, 10))
+            kernels.ConstantKernel(1.0, (1e-3, 1e3))
+            * kernels.Matern(
+                length_scale = ptp,
+                length_scale_bounds = np.outer(ptp, (1e-3, 1e3)),
+                nu = nu
             )
-            # kernels.WhiteKernel(
-            #     noise_level=.1**2,
-            #     noise_level_bounds=(.01**2, 1)
+            # * kernels.RBF(
+            #     length_scale = ptp,
+            #     length_scale_bounds = np.outer(ptp, (1e-3, 1e3))
+            # )
+            # 1. * kernels.RationalQuadratic(
+            #     length_scale = ptp,
+            #     length_scale_bounds = np.outer(ptp, (1e-3, 1e3))
+            # )
+            # + kernels.WhiteKernel(
+            #     noise_level = .1**2,
+            #     noise_level_bounds = (0.0001**2, 1)
             # )
         )
 
@@ -332,6 +342,12 @@ if __name__ == '__main__':
         '--retrain', action='store_true',
         help='retrain even if emulator is cached'
     )
+
+    parser.add_argument(
+        '--nu', type=float,
+        help='nu parameter'
+    )
+
     parser.add_argument(
         'systems', nargs='*', type=arg_to_system,
         default=systems, metavar='SYSTEM',

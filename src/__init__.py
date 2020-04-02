@@ -6,7 +6,7 @@ from pathlib import Path
 import re
 import sys
 import pickle
-from sklearn.externals import joblib
+import joblib
 
 logging.basicConfig(
     stream=sys.stdout,
